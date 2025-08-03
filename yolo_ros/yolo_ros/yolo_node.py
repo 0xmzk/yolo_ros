@@ -35,7 +35,7 @@ from ultralytics.engine.results import Masks
 from ultralytics.engine.results import Keypoints
 
 from std_srvs.srv import SetBool
-from sensor_msgs.msg import Image
+from sensor_msgs.msg import Image, CompressedImage
 from yolo_msgs.msg import Point2D
 from yolo_msgs.msg import BoundingBox2D
 from yolo_msgs.msg import Mask
@@ -57,12 +57,13 @@ class YoloNode(LifecycleNode):
         self.declare_parameter("device", "cuda:0")
         self.declare_parameter("yolo_encoding", "bgr8")
         self.declare_parameter("enable", True)
+        self.declare_parameter("input_image_type", "Image")
         self.declare_parameter("image_reliability", QoSReliabilityPolicy.BEST_EFFORT)
 
         self.declare_parameter("threshold", 0.5)
         self.declare_parameter("iou", 0.5)
-        self.declare_parameter("imgsz_height", 640)
-        self.declare_parameter("imgsz_width", 640)
+        self.declare_parameter("imgsz_height", 800)
+        self.declare_parameter("imgsz_width", 800)
         self.declare_parameter("half", False)
         self.declare_parameter("max_det", 300)
         self.declare_parameter("augment", False)
@@ -107,6 +108,9 @@ class YoloNode(LifecycleNode):
 
         # ros params
         self.enable = self.get_parameter("enable").get_parameter_value().bool_value
+        self.input_image_type = (
+            self.get_parameter("input_image_type").get_parameter_value().string_value
+        )
         self.reliability = (
             self.get_parameter("image_reliability").get_parameter_value().integer_value
         )
@@ -151,9 +155,17 @@ class YoloNode(LifecycleNode):
                 SetClasses, "set_classes", self.set_classes_cb
             )
 
-        self._sub = self.create_subscription(
-            Image, "image_raw", self.image_cb, self.image_qos_profile
-        )
+        # Create subscription based on input image type
+        # No need to set separate topics for each type
+        #   because the topic is remapped in the launchfile 
+        if self.input_image_type == "CompressedImage":
+            self._sub = self.create_subscription(
+                CompressedImage, "image_raw", self.compressed_image_cb, self.image_qos_profile
+            )
+        else:  # Default to Image
+            self._sub = self.create_subscription(
+                Image, "image_raw", self.image_cb, self.image_qos_profile
+            )
 
         super().on_activate(state)
         self.get_logger().info(f"[{self.get_name()}] Activated")
@@ -326,68 +338,80 @@ class YoloNode(LifecycleNode):
 
         return keypoints_list
 
+    def process_image(self, cv_image, header) -> None:
+        """Common image processing logic for both Image and CompressedImage"""
+        results = self.yolo.predict(
+            source=cv_image,
+            verbose=False,
+            stream=False,
+            conf=self.threshold,
+            iou=self.iou,
+            imgsz=(self.imgsz_height, self.imgsz_width),
+            half=self.half,
+            max_det=self.max_det,
+            augment=self.augment,
+            agnostic_nms=self.agnostic_nms,
+            retina_masks=self.retina_masks,
+            device=self.device,
+        )
+        results: Results = results[0].cpu()
+
+        if results.boxes or results.obb:
+            hypothesis = self.parse_hypothesis(results)
+            boxes = self.parse_boxes(results)
+
+        if results.masks:
+            masks = self.parse_masks(results)
+
+        if results.keypoints:
+            keypoints = self.parse_keypoints(results)
+
+        # create detection msgs
+        detections_msg = DetectionArray()
+
+        for i in range(len(results)):
+
+            aux_msg = Detection()
+
+            if results.boxes or results.obb and hypothesis and boxes:
+                aux_msg.class_id = hypothesis[i]["class_id"]
+                aux_msg.class_name = hypothesis[i]["class_name"]
+                aux_msg.score = hypothesis[i]["score"]
+
+                aux_msg.bbox = boxes[i]
+
+            if results.masks and masks:
+                aux_msg.mask = masks[i]
+
+            if results.keypoints and keypoints:
+                aux_msg.keypoints = keypoints[i]
+
+            detections_msg.detections.append(aux_msg)
+
+        # publish detections
+        detections_msg.header = header
+        self._pub.publish(detections_msg)
+
+        del results
+        del cv_image
+
     def image_cb(self, msg: Image) -> None:
-
+        """Callback for regular Image messages"""
         if self.enable:
-
             # convert image + predict
             cv_image = self.cv_bridge.imgmsg_to_cv2(
                 msg, desired_encoding=self.yolo_encoding
             )
-            results = self.yolo.predict(
-                source=cv_image,
-                verbose=False,
-                stream=False,
-                conf=self.threshold,
-                iou=self.iou,
-                imgsz=(self.imgsz_height, self.imgsz_width),
-                half=self.half,
-                max_det=self.max_det,
-                augment=self.augment,
-                agnostic_nms=self.agnostic_nms,
-                retina_masks=self.retina_masks,
-                device=self.device,
+            self.process_image(cv_image, msg.header)
+
+    def compressed_image_cb(self, msg: CompressedImage) -> None:
+        """Callback for CompressedImage messages"""
+        if self.enable:
+            # convert compressed image + predict
+            cv_image = self.cv_bridge.compressed_imgmsg_to_cv2(
+                msg, desired_encoding=self.yolo_encoding
             )
-            results: Results = results[0].cpu()
-
-            if results.boxes or results.obb:
-                hypothesis = self.parse_hypothesis(results)
-                boxes = self.parse_boxes(results)
-
-            if results.masks:
-                masks = self.parse_masks(results)
-
-            if results.keypoints:
-                keypoints = self.parse_keypoints(results)
-
-            # create detection msgs
-            detections_msg = DetectionArray()
-
-            for i in range(len(results)):
-
-                aux_msg = Detection()
-
-                if results.boxes or results.obb and hypothesis and boxes:
-                    aux_msg.class_id = hypothesis[i]["class_id"]
-                    aux_msg.class_name = hypothesis[i]["class_name"]
-                    aux_msg.score = hypothesis[i]["score"]
-
-                    aux_msg.bbox = boxes[i]
-
-                if results.masks and masks:
-                    aux_msg.mask = masks[i]
-
-                if results.keypoints and keypoints:
-                    aux_msg.keypoints = keypoints[i]
-
-                detections_msg.detections.append(aux_msg)
-
-            # publish detections
-            detections_msg.header = msg.header
-            self._pub.publish(detections_msg)
-
-            del results
-            del cv_image
+            self.process_image(cv_image, msg.header)
 
     def set_classes_cb(
         self,

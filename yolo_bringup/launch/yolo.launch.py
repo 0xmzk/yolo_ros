@@ -88,14 +88,14 @@ def generate_launch_description():
         imgsz_height = LaunchConfiguration("imgsz_height")
         imgsz_height_cmd = DeclareLaunchArgument(
             "imgsz_height",
-            default_value="480",
+            default_value="800",
             description="Image height for inference",
         )
 
         imgsz_width = LaunchConfiguration("imgsz_width")
         imgsz_width_cmd = DeclareLaunchArgument(
             "imgsz_width",
-            default_value="640",
+            default_value="800",
             description="Image width for inference",
         )
 
@@ -132,6 +132,14 @@ def generate_launch_description():
             "retina_masks",
             default_value="False",
             description="Whether to use high-resolution segmentation masks if available in the model, enhancing mask quality for segmentation",
+        )
+
+        input_image_type = LaunchConfiguration("input_image_type")
+        input_image_type_cmd = DeclareLaunchArgument(
+            "input_image_type",
+            default_value="Image",
+            choices=["Image", "CompressedImage"],
+            description="Type of input image message (Image for sensor_msgs/Image, CompressedImage for sensor_msgs/CompressedImage)",
         )
 
         input_image_topic = LaunchConfiguration("input_image_topic")
@@ -238,6 +246,7 @@ def generate_launch_description():
                     "device": device,
                     "yolo_encoding": yolo_encoding,
                     "enable": enable,
+                    "input_image_type": input_image_type,
                     "threshold": threshold,
                     "iou": iou,
                     "imgsz_height": imgsz_height,
@@ -290,7 +299,12 @@ def generate_launch_description():
             executable="debug_node",
             name="debug_node",
             namespace=namespace,
-            parameters=[{"image_reliability": image_reliability}],
+            parameters=[
+                {
+                    "image_reliability": image_reliability,
+                    "input_image_type": input_image_type,
+                }
+            ],
             remappings=[
                 ("image_raw", input_image_topic),
                 ("detections", debug_detections_topic),
@@ -314,6 +328,7 @@ def generate_launch_description():
             augment_cmd,
             agnostic_nms_cmd,
             retina_masks_cmd,
+            input_image_type_cmd,
             input_image_topic_cmd,
             image_reliability_cmd,
             input_depth_topic_cmd,

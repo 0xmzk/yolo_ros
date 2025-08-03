@@ -33,7 +33,7 @@ import message_filters
 from cv_bridge import CvBridge
 from ultralytics.utils.plotting import Annotator, colors
 
-from sensor_msgs.msg import Image
+from sensor_msgs.msg import Image, CompressedImage
 from visualization_msgs.msg import Marker
 from visualization_msgs.msg import MarkerArray
 from yolo_msgs.msg import BoundingBox2D
@@ -53,9 +53,14 @@ class DebugNode(LifecycleNode):
 
         # params
         self.declare_parameter("image_reliability", QoSReliabilityPolicy.BEST_EFFORT)
+        self.declare_parameter("input_image_type", "Image")
 
     def on_configure(self, state: LifecycleState) -> TransitionCallbackReturn:
         self.get_logger().info(f"[{self.get_name()}] Configuring...")
+
+        self.input_image_type = (
+            self.get_parameter("input_image_type").get_parameter_value().string_value
+        )
 
         self.image_qos_profile = QoSProfile(
             reliability=self.get_parameter("image_reliability")
@@ -80,9 +85,17 @@ class DebugNode(LifecycleNode):
         self.get_logger().info(f"[{self.get_name()}] Activating...")
 
         # subs
-        self.image_sub = message_filters.Subscriber(
-            self, Image, "image_raw", qos_profile=self.image_qos_profile
-        )
+        # No need to set separate topic names for each type
+        #   because the topic is remapped in the launchfile
+        if self.input_image_type == "CompressedImage":
+            self.image_sub = message_filters.Subscriber(
+                self, CompressedImage, "image_raw", qos_profile=self.image_qos_profile
+            )
+        else:  # Default to Image
+            self.image_sub = message_filters.Subscriber(
+                self, Image, "image_raw", qos_profile=self.image_qos_profile
+            )
+
         self.detections_sub = message_filters.Subscriber(
             self, DetectionArray, "detections", qos_profile=10
         )
@@ -330,8 +343,13 @@ class DebugNode(LifecycleNode):
 
         return marker
 
-    def detections_cb(self, img_msg: Image, detection_msg: DetectionArray) -> None:
-        cv_image = self.cv_bridge.imgmsg_to_cv2(img_msg, desired_encoding="bgr8")
+    def detections_cb(self, img_msg, detection_msg: DetectionArray) -> None:
+        # Handle both Image and CompressedImage types
+        if isinstance(img_msg, CompressedImage):
+            cv_image = self.cv_bridge.compressed_imgmsg_to_cv2(img_msg, desired_encoding="bgr8")
+        else:  # Image
+            cv_image = self.cv_bridge.imgmsg_to_cv2(img_msg, desired_encoding="bgr8")
+            
         bb_marker_array = MarkerArray()
         kp_marker_array = MarkerArray()
 
